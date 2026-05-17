@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="820" viewBox="0 0 1500 820">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" fill="#222"/></marker>
+    <marker id="r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" fill="#8a2d3b"/></marker>
+    <style>
+      .frame{fill:none;stroke:#111;stroke-width:2;stroke-dasharray:8 6;rx:16}
+      .box{stroke:#222;stroke-width:1.4;rx:10}
+      .t{font-family:Arial,sans-serif;font-size:18px;font-weight:700;fill:#111}
+      .s{font-family:Arial,sans-serif;font-size:13px;fill:#222}
+      .h{font-family:Times New Roman,serif;font-size:25px;font-weight:700;font-style:italic}
+      .l{stroke:#222;stroke-width:2;fill:none;marker-end:url(#a)}
+      .d{stroke:#8a2d3b;stroke-width:2;fill:none;marker-end:url(#r)}
+    </style>
+  </defs>
+  <rect width="1500" height="820" fill="#fff"/>
+  <text x="750" y="42" text-anchor="middle" class="h">Adversarial VP-SDE Completion for Incomplete EEG-Eye Emotion Recognition</text>
+
+  <rect x="25" y="70" width="250" height="560" class="frame"/>
+  <rect x="300" y="70" width="320" height="560" class="frame"/>
+  <rect x="645" y="70" width="340" height="560" class="frame"/>
+  <rect x="1010" y="70" width="230" height="560" class="frame"/>
+  <rect x="1265" y="70" width="210" height="560" class="frame"/>
+  <rect x="25" y="660" width="1450" height="125" class="frame"/>
+
+  <text x="48" y="105" class="h">I. Inputs</text>
+  <text x="322" y="105" class="h">II. Encoders</text>
+  <text x="668" y="105" class="h">III. VP-SDE U-Net</text>
+  <text x="1032" y="105" class="h">IV. Fusion</text>
+  <text x="1286" y="105" class="h">V. Discriminators</text>
+
+  <rect x="55" y="135" width="190" height="120" fill="#e8f3fc" class="box"/>
+  <text x="150" y="165" text-anchor="middle" class="t">EEG</text>
+  <text x="150" y="192" text-anchor="middle" class="s">window: B x 5 x 62</text>
+  <text x="150" y="214" text-anchor="middle" class="s">trial: B x 10 x 5 x 62</text>
+  <rect x="55" y="300" width="190" height="115" fill="#ecf8ed" class="box"/>
+  <text x="150" y="330" text-anchor="middle" class="t">Eye</text>
+  <text x="150" y="357" text-anchor="middle" class="s">window: B x 33</text>
+  <text x="150" y="379" text-anchor="middle" class="s">trial: B x 10 x 31</text>
+  <rect x="65" y="470" width="170" height="75" fill="#fff5df" class="box"/>
+  <text x="150" y="500" text-anchor="middle" class="t">Mask</text>
+  <text x="150" y="526" text-anchor="middle" class="s">m = [m_EEG, m_Eye]</text>
+
+  <rect x="330" y="135" width="260" height="185" fill="#e8f3fc" class="box"/>
+  <text x="460" y="165" text-anchor="middle" class="t">EEG Encoder</text>
+  <text x="460" y="197" text-anchor="middle" class="s">Band Attention</text>
+  <text x="460" y="222" text-anchor="middle" class="s">Learnable Channel Graph</text>
+  <text x="460" y="247" text-anchor="middle" class="s">Temporal GRU for trial mode</text>
+  <text x="460" y="282" text-anchor="middle" class="s">z_EEG: B x 16 x 32</text>
+  <rect x="330" y="370" width="260" height="150" fill="#ecf8ed" class="box"/>
+  <text x="460" y="400" text-anchor="middle" class="t">Eye Encoder</text>
+  <text x="460" y="432" text-anchor="middle" class="s">MLP for window mode</text>
+  <text x="460" y="457" text-anchor="middle" class="s">Temporal Transformer for trial mode</text>
+  <text x="460" y="492" text-anchor="middle" class="s">z_Eye: B x 16 x 32</text>
+  <rect x="370" y="555" width="180" height="45" fill="#fff5df" class="box"/>
+  <text x="460" y="583" text-anchor="middle" class="t">Mask Encoder</text>
+
+  <rect x="680" y="130" width="270" height="185" fill="#fff8eb" class="box"/>
+  <text x="815" y="160" text-anchor="middle" class="t">Recover EEG</text>
+  <text x="815" y="190" text-anchor="middle" class="s">Q = noisy EEG latent</text>
+  <text x="815" y="215" text-anchor="middle" class="s">K/V = Eye condition</text>
+  <text x="815" y="250" text-anchor="middle" class="s">VP-SDE score matching</text>
+  <text x="815" y="276" text-anchor="middle" class="s">1D U-Net backbone</text>
+  <rect x="680" y="370" width="270" height="185" fill="#fff8eb" class="box"/>
+  <text x="815" y="400" text-anchor="middle" class="t">Recover Eye</text>
+  <text x="815" y="430" text-anchor="middle" class="s">Q = noisy Eye latent</text>
+  <text x="815" y="455" text-anchor="middle" class="s">K/V = EEG condition</text>
+  <text x="815" y="490" text-anchor="middle" class="s">VP-SDE score matching</text>
+  <text x="815" y="516" text-anchor="middle" class="s">1D U-Net backbone</text>
+
+  <rect x="1035" y="145" width="180" height="90" fill="#f5f5f5" class="box"/>
+  <text x="1125" y="177" text-anchor="middle" class="t">Decoders</text>
+  <text x="1125" y="205" text-anchor="middle" class="s">generated EEG / Eye</text>
+  <rect x="1035" y="295" width="180" height="105" fill="#eee5f7" class="box"/>
+  <text x="1125" y="327" text-anchor="middle" class="t">Layer-wise Fusion</text>
+  <text x="1125" y="356" text-anchor="middle" class="s">f_real</text>
+  <text x="1125" y="380" text-anchor="middle" class="s">f_completed</text>
+  <rect x="1035" y="465" width="180" height="82" fill="#f8eef5" class="box"/>
+  <text x="1125" y="497" text-anchor="middle" class="t">Classifier</text>
+  <text x="1125" y="524" text-anchor="middle" class="s">prototypes + logits</text>
+
+  <rect x="1288" y="125" width="165" height="70" fill="#ffe8ee" class="box"/>
+  <text x="1370" y="153" text-anchor="middle" class="t">D_var</text>
+  <text x="1370" y="176" text-anchor="middle" class="s">local realism</text>
+  <rect x="1288" y="230" width="165" height="70" fill="#ffe8ee" class="box"/>
+  <text x="1370" y="258" text-anchor="middle" class="t">D_mod</text>
+  <text x="1370" y="281" text-anchor="middle" class="s">modality realism</text>
+  <rect x="1288" y="335" width="165" height="86" fill="#ffe8ee" class="box"/>
+  <text x="1370" y="363" text-anchor="middle" class="t">D_lat</text>
+  <text x="1370" y="386" text-anchor="middle" class="s">conditional pair</text>
+  <text x="1370" y="407" text-anchor="middle" class="s">z_avail + z_target</text>
+  <rect x="1288" y="465" width="165" height="70" fill="#ffe8ee" class="box"/>
+  <text x="1370" y="493" text-anchor="middle" class="t">D_fus</text>
+  <text x="1370" y="516" text-anchor="middle" class="s">fusion realism</text>
+
+  <rect x="70" y="700" width="410" height="55" fill="#eef6ff" class="box"/>
+  <text x="275" y="735" text-anchor="middle" class="t">Stage 1: L_sde + L_rec + L_ae</text>
+  <rect x="545" y="700" width="410" height="55" fill="#fff5df" class="box"/>
+  <text x="750" y="735" text-anchor="middle" class="t">Stage 2: + multi-level adversarial loss</text>
+  <rect x="1020" y="700" width="410" height="55" fill="#f8eef5" class="box"/>
+  <text x="1225" y="735" text-anchor="middle" class="t">Stage 3: + classification, prototype, consistency</text>
+
+  <path class="l" d="M245 195 L330 225"/>
+  <path class="l" d="M245 358 L330 445"/>
+  <path class="l" d="M235 507 L370 577"/>
+  <path class="l" d="M590 240 L680 215"/>
+  <path class="l" d="M590 445 L680 455"/>
+  <path class="l" d="M950 220 L1035 190"/>
+  <path class="l" d="M950 465 L1035 190"/>
+  <path class="l" d="M1125 235 L1125 295"/>
+  <path class="l" d="M1125 400 L1125 465"/>
+  <path class="d" d="M1035 190 C1245 190 1245 160 1288 160"/>
+  <path class="d" d="M1035 190 C1245 190 1245 265 1288 265"/>
+  <path class="d" d="M590 240 C1130 240 1218 378 1288 378"/>
+  <path class="d" d="M1215 347 C1245 347 1245 500 1288 500"/>
+</svg>

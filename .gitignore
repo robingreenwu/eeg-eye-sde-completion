@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Training artifacts
+runs/
+checkpoint/
+*.pth
+*.pt
+*.ckpt
+
+# Local plotting caches
+.cache/
+.mplconfig/
+
+# Large local data should stay outside the code repository.
+Dataset/
+data/
+*.zip
+*.mat

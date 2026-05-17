@@ -1,0 +1,16 @@
+[project]
+name = "eeg-eye-completion"
+version = "0.1.0"
+description = "Adversarial VP-SDE completion for incomplete EEG-Eye multimodal emotion recognition."
+requires-python = ">=3.9"
+dependencies = [
+  "einops",
+  "h5py",
+  "matplotlib",
+  "numpy",
+  "torch",
+  "tqdm",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
