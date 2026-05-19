@@ -5,7 +5,7 @@ from torch import sqrt
 from torch import nn, einsum
 from .transformers_encoder.transformer import TransformerEncoder
 from torch.special import expm1
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from functools import partial, wraps
 import math
 import torch.nn.functional as F
@@ -109,10 +109,36 @@ def extract(a, t, x_shape):
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
+
+UNET_ATTENTION_PRESETS = {
+    "all": {"down1", "down2", "down3", "down4", "up4", "up3", "up2", "up1"},
+    "sampling": {"down2", "down3", "down4", "up4", "up3", "up2"},
+    "critical": {"down3", "down4", "up4", "up3"},
+    "bottleneck": {"down4", "up4"},
+    "none": set(),
+}
+
+
+def resolve_unet_attention(attention_layers):
+    if attention_layers is None:
+        return UNET_ATTENTION_PRESETS["all"]
+    if isinstance(attention_layers, str):
+        value = attention_layers.strip().lower()
+        if value in UNET_ATTENTION_PRESETS:
+            return UNET_ATTENTION_PRESETS[value]
+        layers = {part.strip().lower() for part in value.split(",") if part.strip()}
+    else:
+        layers = {str(part).strip().lower() for part in attention_layers if str(part).strip()}
+    valid = UNET_ATTENTION_PRESETS["all"]
+    invalid = sorted(layers - valid)
+    if invalid:
+        raise ValueError(f"Unknown U-Net attention layers: {invalid}. Valid layers: {sorted(valid)}")
+    return layers
+
 class UNet(nn.Module):
     """U-Net architecture."""
 
-    def __init__(self, input_channel=32, channels=[32, 64, 128, 256], embed_dim=256):
+    def __init__(self, input_channel=32, channels=[32, 64, 128, 256], embed_dim=256, attention_layers="all"):
         """Initialize a time-dependent score-based network.
 
         Args:
@@ -120,55 +146,41 @@ class UNet(nn.Module):
           embed_dim: The dimensionality of Gaussian random feature embeddings.
         """
         super().__init__()
+        self.attention_layers = resolve_unet_attention(attention_layers)
+
+        def attention(name, dim):
+            if name not in self.attention_layers:
+                return None
+            return TransformerEncoder(embed_dim=dim,
+                                      num_heads=8,
+                                      layers=2,
+                                      attn_dropout=0.0,
+                                      relu_dropout=0.0,
+                                      res_dropout=0.0,
+                                      embed_dropout=0.0,
+                                      attn_mask=True)
+
         # Gaussian random feature embedding layer for time
         self.embed = nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim),
                                    nn.Linear(embed_dim, embed_dim))
         # Encoding layers where the temporal resolution decreases
         self.conv1 = nn.Conv1d(input_channel, channels[0], 3, stride=1, padding=1, bias=False)
-        self.attention_1 = TransformerEncoder(embed_dim=channels[0],
-                                              num_heads=8,
-                                              layers=2,
-                                              attn_dropout=0.0,
-                                              relu_dropout=0.0,
-                                              res_dropout=0.0,
-                                              embed_dropout=0.0,
-                                              attn_mask=True)
+        self.attention_1 = attention("down1", channels[0])
         self.dense1 = Dense(embed_dim, channels[0])
         self.gnorm1 = nn.GroupNorm(4, num_channels=channels[0])
         self.conv2 = nn.Conv1d(channels[0], channels[1], 3, stride=2, padding=1, bias=False)
         self.conv2_cond = nn.Conv1d(channels[0], channels[1], 3, stride=2, padding=1, bias=False)
-        self.attention_2 = TransformerEncoder(embed_dim=channels[1],
-                                              num_heads=8,
-                                              layers=2,
-                                              attn_dropout=0.0,
-                                              relu_dropout=0.0,
-                                              res_dropout=0.0,
-                                              embed_dropout=0.0,
-                                              attn_mask=True)
+        self.attention_2 = attention("down2", channels[1])
         self.dense2 = Dense(embed_dim, channels[1])
         self.gnorm2 = nn.GroupNorm(32, num_channels=channels[1])
         self.conv3 = nn.Conv1d(channels[1], channels[2], 3, stride=2, padding=1, bias=False)
         self.conv3_cond = nn.Conv1d(channels[1], channels[2], 3, stride=2, padding=1, bias=False)
-        self.attention_3 = TransformerEncoder(embed_dim=channels[2],
-                                              num_heads=8,
-                                              layers=2,
-                                              attn_dropout=0.0,
-                                              relu_dropout=0.0,
-                                              res_dropout=0.0,
-                                              embed_dropout=0.0,
-                                              attn_mask=True)
+        self.attention_3 = attention("down3", channels[2])
         self.dense3 = Dense(embed_dim, channels[2])
         self.gnorm3 = nn.GroupNorm(32, num_channels=channels[2])
         self.conv4 = nn.Conv1d(channels[2], channels[3], 3, stride=2, padding=1, bias=False)
         self.conv4_cond = nn.Conv1d(channels[2], channels[3], 3, stride=2, padding=1, bias=False)
-        self.attention_4 = TransformerEncoder(embed_dim=channels[3],
-                                              num_heads=8,
-                                              layers=2,
-                                              attn_dropout=0.0,
-                                              relu_dropout=0.0,
-                                              res_dropout=0.0,
-                                              embed_dropout=0.0,
-                                              attn_mask=True)
+        self.attention_4 = attention("down4", channels[3])
         self.dense4 = Dense(embed_dim, channels[3])
         self.gnorm4 = nn.GroupNorm(32, num_channels=channels[3])
 
@@ -176,66 +188,42 @@ class UNet(nn.Module):
         self.tconv4 = nn.ConvTranspose1d(channels[3], channels[2], 3, stride=2, padding=1, bias=False, output_padding=1)
         self.tconv4_cond = nn.ConvTranspose1d(channels[3], channels[2], 3, stride=2, padding=1, bias=False,
                                               output_padding=1)
-        self.attention_t4 = TransformerEncoder(embed_dim=channels[2],
-                                               num_heads=8,
-                                               layers=2,
-                                               attn_dropout=0.0,
-                                               relu_dropout=0.0,
-                                               res_dropout=0.0,
-                                               embed_dropout=0.0,
-                                               attn_mask=True)
+        self.attention_t4 = attention("up4", channels[2])
         self.dense5 = Dense(embed_dim, channels[2])
         self.tgnorm4 = nn.GroupNorm(32, num_channels=channels[2])
         self.tconv3 = nn.ConvTranspose1d(channels[2] + channels[2], channels[1], 3, stride=2, padding=1, bias=False,
                                          output_padding=1)
         self.tconv3_cond = nn.ConvTranspose1d(channels[2], channels[1], 3, stride=2, padding=1, bias=False,
                                               output_padding=1)
-        self.attention_t3 = TransformerEncoder(embed_dim=channels[1],
-                                               num_heads=8,
-                                               layers=2,
-                                               attn_dropout=0.0,
-                                               relu_dropout=0.0,
-                                               res_dropout=0.0,
-                                               embed_dropout=0.0,
-                                               attn_mask=True)
+        self.attention_t3 = attention("up3", channels[1])
         self.dense6 = Dense(embed_dim, channels[1])
         self.tgnorm3 = nn.GroupNorm(32, num_channels=channels[1])
         self.tconv2 = nn.ConvTranspose1d(channels[1] + channels[1], channels[0], 3, stride=2, padding=1, bias=False,
                                          output_padding=1)
         self.tconv2_cond = nn.ConvTranspose1d(channels[1], channels[0], 3, stride=2, padding=1, bias=False,
                                               output_padding=1)
-        self.attention_t2 = TransformerEncoder(embed_dim=channels[0],
-                                               num_heads=8,
-                                               layers=2,
-                                               attn_dropout=0.0,
-                                               relu_dropout=0.0,
-                                               res_dropout=0.0,
-                                               embed_dropout=0.0,
-                                               attn_mask=True)
+        self.attention_t2 = attention("up2", channels[0])
         self.dense7 = Dense(embed_dim, channels[0])
         self.tgnorm2 = nn.GroupNorm(4, num_channels=channels[0])
         self.tconv1 = nn.ConvTranspose1d(channels[0] + channels[0], input_channel, 3, stride=1, padding=1)
         self.tconv1_cond = nn.ConvTranspose1d(channels[0], input_channel, 3, stride=1, padding=1)
-        self.attention_t1 = TransformerEncoder(embed_dim=embed_dim,
-                                               num_heads=8,
-                                               layers=2,
-                                               attn_dropout=0.0,
-                                               relu_dropout=0.0,
-                                               res_dropout=0.0,
-                                               embed_dropout=0.0,
-                                               attn_mask=True)
+        self.attention_t1 = attention("up1", embed_dim)
 
         # The swish activation function
         self.act = lambda x: x * torch.sigmoid(x)
+
+    def apply_attention(self, attn, h, condition):
+        if attn is None or condition is None:
+            return h
+        h_with_cond = attn(h.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
+        return h + h_with_cond.permute(1, 2, 0)
 
     def forward(self, x, t, condition=None):
         # Obtain the Gaussian random feature embedding for t
         embed = self.act(self.embed(t))
         # Encoding path
         h1 = self.conv1(x)
-        if condition is not None:
-            h1_with_cond = self.attention_1(h1.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h1 += h1_with_cond.permute(1, 2, 0)
+        h1 = self.apply_attention(self.attention_1, h1, condition)
         ## Incorporate information from t
         h1 += self.dense1(embed)
         ## Group normalization
@@ -244,24 +232,21 @@ class UNet(nn.Module):
         h2 = self.conv2(h1)
         if condition is not None:
             condition = self.conv2_cond(condition)  # align condition with h2
-            h2_with_cond = self.attention_2(h2.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h2 += h2_with_cond.permute(1, 2, 0)
+        h2 = self.apply_attention(self.attention_2, h2, condition)
         h2 += self.dense2(embed)
         h2 = self.gnorm2(h2)
         h2 = self.act(h2)
         h3 = self.conv3(h2)
         if condition is not None:
             condition = self.conv3_cond(condition)  # align condition with h3
-            h3_with_cond = self.attention_3(h3.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h3 += h3_with_cond.permute(1, 2, 0)
+        h3 = self.apply_attention(self.attention_3, h3, condition)
         h3 += self.dense3(embed)
         h3 = self.gnorm3(h3)
         h3 = self.act(h3)
         h4 = self.conv4(h3)
         if condition is not None:
             condition = self.conv4_cond(condition)  # align condition with h4
-            h4_with_cond = self.attention_4(h4.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h4 += h4_with_cond.permute(1, 2, 0)
+        h4 = self.apply_attention(self.attention_4, h4, condition)
         h4 += self.dense4(embed)
         h4 = self.gnorm4(h4)
         h4 = self.act(h4)
@@ -270,8 +255,7 @@ class UNet(nn.Module):
         h = self.tconv4(h4)
         if condition is not None:
             condition = self.tconv4_cond(condition)
-            h_with_cond = self.attention_t4(h.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h += h_with_cond.permute(1, 2, 0)
+        h = self.apply_attention(self.attention_t4, h, condition)
         ## Skip connection from the encoding path
         h += self.dense5(embed)
         h = self.tgnorm4(h)
@@ -279,24 +263,21 @@ class UNet(nn.Module):
         h = self.tconv3(torch.cat([h, h3], dim=1))
         if condition is not None:
             condition = self.tconv3_cond(condition)
-            h_with_cond = self.attention_t3(h.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h += h_with_cond.permute(1, 2, 0)
+        h = self.apply_attention(self.attention_t3, h, condition)
         h += self.dense6(embed)
         h = self.tgnorm3(h)
         h = self.act(h)
         h = self.tconv2(torch.cat([h, h2], dim=1))
         if condition is not None:
             condition = self.tconv2_cond(condition)
-            h_with_cond = self.attention_t2(h.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h += h_with_cond.permute(1, 2, 0)
+        h = self.apply_attention(self.attention_t2, h, condition)
         h += self.dense7(embed)
         h = self.tgnorm2(h)
         h = self.act(h)
         h = self.tconv1(torch.cat([h, h1], dim=1))
-        if condition is not None:
+        if condition is not None and self.attention_t1 is not None:
             condition = self.tconv1_cond(condition)
-            h_with_cond = self.attention_t1(h.permute(2, 0, 1), condition.permute(2, 0, 1), condition.permute(2, 0, 1))
-            h += h_with_cond.permute(1, 2, 0)
+        h = self.apply_attention(self.attention_t1, h, condition)
 
         return h
 
@@ -305,11 +286,11 @@ class DiffusionNet(nn.Module):
     def __init__(self, input_size, input_channel=16, timesteps=1000, sampling_timesteps=None, objective='pred_noise',
                  beta_schedule='sigmoid', schedule_fn_kwargs = dict(), ddim_sampling_eta = 0.,
                  offset_noise_strength = 0., min_snr_loss_weight=False,  min_snr_gamma=5,
-                 channels=[32, 64, 128, 256], embed_dim=256):
+                 channels=[32, 64, 128, 256], embed_dim=256, attention_layers="all"):
         super().__init__()
         self.input_size = input_size
 
-        self.model = UNet(input_channel=input_channel, channels=channels, embed_dim=embed_dim)
+        self.model = UNet(input_channel=input_channel, channels=channels, embed_dim=embed_dim, attention_layers=attention_layers)
 
         self.objective = 'pred_noise'
         if beta_schedule == 'linear':
@@ -565,7 +546,7 @@ class DiffusionNet(nn.Module):
 
     # training related functions - noise prediction
 
-    @autocast(enabled=False)
+    @autocast("cuda", enabled=False)
     def q_sample(self, x_start, t, noise=None, condition=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
 

@@ -30,11 +30,20 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, missing: torch.Tensor)
 
 
 class MLP(nn.Module):
-    def __init__(self, dims: list[int], activation: type[nn.Module] = nn.LeakyReLU, dropout: float = 0.0):
+    def __init__(
+        self,
+        dims: list[int],
+        activation: type[nn.Module] = nn.LeakyReLU,
+        dropout: float = 0.0,
+        spectral_norm: bool = False,
+    ):
         super().__init__()
         layers: list[nn.Module] = []
         for i in range(len(dims) - 1):
-            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            linear = nn.Linear(dims[i], dims[i + 1])
+            if spectral_norm:
+                linear = nn.utils.spectral_norm(linear)
+            layers.append(linear)
             if i != len(dims) - 2:
                 layers.append(activation())
                 if dropout > 0:
@@ -146,29 +155,33 @@ class ShapeDecoder(nn.Module):
 
 
 class ModalityDiscriminator(nn.Module):
-    def __init__(self, input_shape: tuple[int, ...], hidden_dim: int = 128):
+    def __init__(self, input_shape: tuple[int, ...], hidden_dim: int = 128, spectral_norm: bool = False):
         super().__init__()
         input_dim = _prod(tuple(input_shape))
-        self.net = MLP([input_dim, hidden_dim, hidden_dim, 1], dropout=0.1)
+        self.net = MLP([input_dim, hidden_dim, hidden_dim, 1], dropout=0.1, spectral_norm=spectral_norm)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x.reshape(x.shape[0], -1)).squeeze(-1)
 
 
 class FusionDiscriminator(nn.Module):
-    def __init__(self, fusion_dim: int, hidden_dim: int = 128):
+    def __init__(self, fusion_dim: int, hidden_dim: int = 128, spectral_norm: bool = False):
         super().__init__()
-        self.net = MLP([fusion_dim, hidden_dim, hidden_dim, 1], dropout=0.1)
+        self.net = MLP([fusion_dim, hidden_dim, hidden_dim, 1], dropout=0.1, spectral_norm=spectral_norm)
 
     def forward(self, fusion: torch.Tensor) -> torch.Tensor:
         return self.net(fusion).squeeze(-1)
 
 
 class VariableDiscriminator(nn.Module):
-    def __init__(self, input_shape: tuple[int, ...], hidden_dim: int = 128):
+    def __init__(self, input_shape: tuple[int, ...], hidden_dim: int = 128, spectral_norm: bool = False):
         super().__init__()
         self.output_dim = _prod(tuple(input_shape))
-        self.net = MLP([self.output_dim, hidden_dim, hidden_dim, self.output_dim], dropout=0.1)
+        self.net = MLP(
+            [self.output_dim, hidden_dim, hidden_dim, self.output_dim],
+            dropout=0.1,
+            spectral_norm=spectral_norm,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x.reshape(x.shape[0], -1))
@@ -177,9 +190,9 @@ class VariableDiscriminator(nn.Module):
 class ConditionalLatentDiscriminator(nn.Module):
     """Judge whether a target latent is realistic under the available modality condition."""
 
-    def __init__(self, latent_dim: int, hidden_dim: int = 128):
+    def __init__(self, latent_dim: int, hidden_dim: int = 128, spectral_norm: bool = False):
         super().__init__()
-        self.net = MLP([latent_dim * 2 + 2, hidden_dim, hidden_dim, 1], dropout=0.1)
+        self.net = MLP([latent_dim * 2 + 2, hidden_dim, hidden_dim, 1], dropout=0.1, spectral_norm=spectral_norm)
 
     def forward(self, condition_latent: torch.Tensor, target_latent: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         x = torch.cat([condition_latent, target_latent, mask], dim=-1)
@@ -199,6 +212,8 @@ class VPSDEDiffusionNet(nn.Module):
         eps: float = 1e-3,
         channels: tuple[int, ...] = (16, 32, 64, 128),
         embed_dim: int = 16,
+        noise_condition: bool = False,
+        attention_layers: str | tuple[str, ...] = "critical",
     ):
         super().__init__()
         self.input_size = input_size
@@ -207,7 +222,13 @@ class VPSDEDiffusionNet(nn.Module):
         self.beta_max = beta_max
         self.sampling_steps = sampling_steps
         self.eps = eps
-        self.model = UNet(input_channel=input_channel, channels=list(channels), embed_dim=embed_dim)
+        self.noise_condition = noise_condition
+        self.model = UNet(
+            input_channel=input_channel,
+            channels=list(channels),
+            embed_dim=embed_dim,
+            attention_layers=attention_layers,
+        )
 
     @property
     def device(self):
@@ -234,7 +255,7 @@ class VPSDEDiffusionNet(nn.Module):
         x_t, noise = self.perturb(x_start, t)
         condition_t = None
         if condition is not None:
-            condition_t, _ = self.perturb(condition, t)
+            condition_t = self.perturb(condition, t)[0] if self.noise_condition else condition
         pred_noise = self.model(x_t, t, condition=condition_t)
         loss = F.mse_loss(pred_noise, noise)
         _, std = self.marginal_prob(x_start, t)
@@ -242,6 +263,21 @@ class VPSDEDiffusionNet(nn.Module):
         mean_coeff = torch.sqrt(torch.clamp(1.0 - std.pow(2), min=1e-12))
         x0_pred = x0_pred / mean_coeff
         return x0_pred, loss
+
+    @torch.no_grad()
+    def denoise_once(
+        self,
+        x_start: torch.Tensor,
+        condition: torch.Tensor | None = None,
+        t_value: float = 0.5,
+    ) -> torch.Tensor:
+        batch = x_start.shape[0]
+        t = torch.full((batch,), float(t_value), device=x_start.device)
+        x_t, _ = self.perturb(x_start, t, noise=torch.zeros_like(x_start))
+        pred_noise = self.model(x_t, t, condition=condition)
+        _, std = self.marginal_prob(x_start, t)
+        mean_coeff = torch.sqrt(torch.clamp(1.0 - std.pow(2), min=1e-12))
+        return ((x_t - std * pred_noise).clamp(-20.0, 20.0) / mean_coeff).clamp(-20.0, 20.0)
 
     @torch.no_grad()
     def sample(self, shape, condition=None, print_progress: bool = False):
@@ -301,6 +337,9 @@ class AdversarialEEGEyeGenerator(nn.Module):
         unet_channels: tuple[int, ...] = (16, 32, 64, 128),
         sde_beta_min: float = 0.1,
         sde_beta_max: float = 20.0,
+        noise_condition: bool = False,
+        spectral_norm_discriminators: bool = False,
+        unet_attention: str | tuple[str, ...] = "critical",
     ):
         super().__init__()
         self.eeg_shape = tuple(eeg_shape)
@@ -332,6 +371,8 @@ class AdversarialEEGEyeGenerator(nn.Module):
             beta_max=sde_beta_max,
             channels=unet_channels,
             embed_dim=latent_channels,
+            noise_condition=noise_condition,
+            attention_layers=unet_attention,
         )
         self.eye_diffusion = VPSDEDiffusionNet(
             input_size=latent_size,
@@ -341,19 +382,29 @@ class AdversarialEEGEyeGenerator(nn.Module):
             beta_max=sde_beta_max,
             channels=unet_channels,
             embed_dim=latent_channels,
+            noise_condition=noise_condition,
+            attention_layers=unet_attention,
         )
 
         self.fusion = MLP([self.latent_dim * 2 + self.latent_dim, hidden_dim * 2, self.fusion_dim])
         self.classifier = MLP([self.fusion_dim, hidden_dim, num_classes])
         self.emotion_prototypes = nn.Parameter(torch.randn(num_classes, self.fusion_dim) * 0.02)
 
-        self.eeg_discriminator = ModalityDiscriminator(self.eeg_shape, hidden_dim)
-        self.eye_discriminator = ModalityDiscriminator(self.eye_shape, hidden_dim)
-        self.fusion_discriminator = FusionDiscriminator(self.fusion_dim, hidden_dim)
-        self.eeg_variable_discriminator = VariableDiscriminator(self.eeg_shape, hidden_dim)
-        self.eye_variable_discriminator = VariableDiscriminator(self.eye_shape, hidden_dim)
-        self.eeg_latent_discriminator = ConditionalLatentDiscriminator(self.latent_dim, hidden_dim)
-        self.eye_latent_discriminator = ConditionalLatentDiscriminator(self.latent_dim, hidden_dim)
+        self.eeg_discriminator = ModalityDiscriminator(self.eeg_shape, hidden_dim, spectral_norm_discriminators)
+        self.eye_discriminator = ModalityDiscriminator(self.eye_shape, hidden_dim, spectral_norm_discriminators)
+        self.fusion_discriminator = FusionDiscriminator(self.fusion_dim, hidden_dim, spectral_norm_discriminators)
+        self.eeg_variable_discriminator = VariableDiscriminator(self.eeg_shape, hidden_dim, spectral_norm_discriminators)
+        self.eye_variable_discriminator = VariableDiscriminator(self.eye_shape, hidden_dim, spectral_norm_discriminators)
+        self.eeg_latent_discriminator = ConditionalLatentDiscriminator(
+            self.latent_dim,
+            hidden_dim,
+            spectral_norm_discriminators,
+        )
+        self.eye_latent_discriminator = ConditionalLatentDiscriminator(
+            self.latent_dim,
+            hidden_dim,
+            spectral_norm_discriminators,
+        )
 
     def generator_parameters(self):
         discriminator_ids = {id(p) for p in self.discriminator_parameters()}
@@ -400,6 +451,14 @@ class AdversarialEEGEyeGenerator(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return diffusion.training_step(target, condition=condition)
 
+    def _denoise_once(
+        self,
+        diffusion: VPSDEDiffusionNet,
+        target: torch.Tensor,
+        condition: torch.Tensor,
+    ) -> torch.Tensor:
+        return diffusion.denoise_once(target, condition=condition)
+
     @torch.no_grad()
     def sample_missing_latent(
         self,
@@ -415,7 +474,12 @@ class AdversarialEEGEyeGenerator(nn.Module):
         )
         return latent
 
-    def forward(self, batch: dict[str, Any], sample: bool = False) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        batch: dict[str, Any],
+        sample: bool = False,
+        completion_mode: str | None = None,
+    ) -> dict[str, torch.Tensor]:
         eeg = batch["eeg"]
         eye = batch["eye"]
         mask = batch["mask"].float()
@@ -427,14 +491,22 @@ class AdversarialEEGEyeGenerator(nn.Module):
         eeg_condition = self._condition_for_eeg(eye_vec, mask)
         eye_condition = self._condition_for_eye(eeg_vec, mask)
 
-        if sample:
+        mode = completion_mode or ("sample" if sample else "teacher")
+        if mode == "sample":
             gen_eeg_latent = self.sample_missing_latent("eeg", eeg_condition)
             gen_eye_latent = self.sample_missing_latent("eye", eye_condition)
             eeg_diff_loss = eeg.new_tensor(0.0)
             eye_diff_loss = eeg.new_tensor(0.0)
-        else:
+        elif mode == "denoise":
+            gen_eeg_latent = self._denoise_once(self.eeg_diffusion, eeg_latent, eeg_condition)
+            gen_eye_latent = self._denoise_once(self.eye_diffusion, eye_latent, eye_condition)
+            eeg_diff_loss = eeg.new_tensor(0.0)
+            eye_diff_loss = eeg.new_tensor(0.0)
+        elif mode == "teacher":
             gen_eeg_latent, eeg_diff_loss = self._denoise_with_loss(self.eeg_diffusion, eeg_latent, eeg_condition)
             gen_eye_latent, eye_diff_loss = self._denoise_with_loss(self.eye_diffusion, eye_latent, eye_condition)
+        else:
+            raise ValueError(f"Unknown completion mode: {mode}")
 
         gen_eeg_vec = self._to_vector_latent(gen_eeg_latent)
         gen_eye_vec = self._to_vector_latent(gen_eye_latent)
@@ -639,6 +711,7 @@ class AdversarialEEGEyeGenerator(nn.Module):
             adv = torch.stack(adv_losses).mean() if adv_losses else eeg.new_tensor(0.0)
             loss = loss + weights.adversarial * adv
             terms["adversarial"] = float(adv.detach().cpu())
+            terms["weight_adversarial"] = float(weights.adversarial)
 
         if stage >= 3:
             classification = F.cross_entropy(outputs["logits_real"], label) + F.cross_entropy(
@@ -659,6 +732,7 @@ class AdversarialEEGEyeGenerator(nn.Module):
                     "classification": float(classification.detach().cpu()),
                     "prototype": float(prototype.detach().cpu()),
                     "consistency": float(consistency.detach().cpu()),
+                    "weight_consistency": float(weights.consistency),
                 }
             )
 

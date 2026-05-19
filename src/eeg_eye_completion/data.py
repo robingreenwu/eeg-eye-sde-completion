@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 import torch
@@ -56,6 +56,29 @@ def _limit_arrays(arrays: EmotionArrays, limit: int | None) -> EmotionArrays:
     return arrays.take(np.arange(limit))
 
 
+def _concat_optional(items: list[np.ndarray | None]) -> np.ndarray | None:
+    present = [item for item in items if item is not None]
+    if not present:
+        return None
+    if len(present) != len(items):
+        raise ValueError("Cannot concatenate arrays with partially missing metadata.")
+    return np.concatenate(present, axis=0)
+
+
+def concat_arrays(items: Sequence[EmotionArrays]) -> EmotionArrays:
+    if not items:
+        raise ValueError("Cannot concatenate an empty array list.")
+    return EmotionArrays(
+        eeg=np.concatenate([item.eeg for item in items], axis=0),
+        eye=np.concatenate([item.eye for item in items], axis=0),
+        label=np.concatenate([item.label for item in items], axis=0),
+        subject=_concat_optional([item.subject for item in items]),
+        session=_concat_optional([item.session for item in items]),
+        sample_index=_concat_optional([item.sample_index for item in items]),
+        source_id=_concat_optional([item.source_id for item in items]),
+    )
+
+
 def load_window_arrays(dataset_root: Path, split: str, limit: int | None = None) -> EmotionArrays:
     path = dataset_root / WINDOW_DIR_NAME / f"{split}.npz"
     if not path.exists():
@@ -75,6 +98,10 @@ def load_window_arrays(dataset_root: Path, split: str, limit: int | None = None)
     return _limit_arrays(arrays, limit)
 
 
+def load_window_full(dataset_root: Path) -> EmotionArrays:
+    return concat_arrays([load_window_arrays(dataset_root, "train"), load_window_arrays(dataset_root, "test")])
+
+
 def _stratified_split(labels: np.ndarray, test_ratio: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
     train_indices: list[np.ndarray] = []
@@ -90,6 +117,58 @@ def _stratified_split(labels: np.ndarray, test_ratio: float, seed: int) -> tuple
     rng.shuffle(train)
     rng.shuffle(test)
     return train, test
+
+
+def _group_split(
+    groups: np.ndarray,
+    test_ratio: float,
+    seed: int,
+    explicit_test_groups: Sequence[int | str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[int | str]]:
+    values = np.asarray(groups)
+    unique = np.unique(values)
+    if explicit_test_groups:
+        test_values = np.asarray(list(explicit_test_groups), dtype=unique.dtype)
+    else:
+        rng = np.random.default_rng(seed)
+        shuffled = np.array(unique, copy=True)
+        rng.shuffle(shuffled)
+        n_test = max(1, int(round(shuffled.shape[0] * test_ratio)))
+        test_values = shuffled[:n_test]
+    test_mask = np.isin(values, test_values)
+    if not test_mask.any() or test_mask.all():
+        raise ValueError(f"Invalid group split. test_groups={test_values.tolist()}")
+    train_idx = np.where(~test_mask)[0]
+    test_idx = np.where(test_mask)[0]
+    return train_idx, test_idx, [value.item() if hasattr(value, "item") else value for value in test_values]
+
+
+def split_arrays(
+    arrays: EmotionArrays,
+    protocol: str,
+    test_ratio: float,
+    seed: int,
+    test_subjects: Sequence[int] | None = None,
+    test_sessions: Sequence[int] | None = None,
+) -> tuple[EmotionArrays, EmotionArrays, dict]:
+    protocol = protocol.lower()
+    split_meta: dict = {"split_protocol": protocol, "test_ratio": test_ratio}
+    if protocol == "stratified":
+        train_idx, test_idx = _stratified_split(arrays.label, test_ratio=test_ratio, seed=seed)
+    elif protocol == "subject":
+        if arrays.subject is None:
+            raise ValueError("Subject split requires subject metadata.")
+        train_idx, test_idx, groups = _group_split(arrays.subject, test_ratio, seed, test_subjects)
+        split_meta["test_subjects"] = groups
+    elif protocol == "session":
+        if arrays.session is None:
+            raise ValueError("Session split requires session metadata.")
+        train_idx, test_idx, groups = _group_split(arrays.session, test_ratio, seed, test_sessions)
+        split_meta["test_sessions"] = groups
+    else:
+        raise ValueError(f"Unknown split protocol: {protocol}")
+
+    return arrays.take(train_idx), arrays.take(test_idx), split_meta
 
 
 def _load_seed_iv_full(dataset_root: Path) -> EmotionArrays:
@@ -231,15 +310,42 @@ def build_emotion_dataloaders(
     normalize: bool | None = None,
     train_limit: int | None = None,
     test_limit: int | None = None,
+    split_protocol: str = "predefined",
+    test_ratio: float = 0.2,
+    test_subjects: Sequence[int] | None = None,
+    test_sessions: Sequence[int] | None = None,
 ) -> tuple[DataLoader, DataLoader, dict]:
     root = (dataset_root or default_dataset_root()).resolve()
     data_mode = data_mode.lower()
+    split_meta: dict = {"split_protocol": split_protocol, "test_ratio": test_ratio}
     if data_mode == "window":
-        train = load_window_arrays(root, "train", train_limit)
-        test = load_window_arrays(root, "test", test_limit)
+        if split_protocol == "predefined":
+            train = load_window_arrays(root, "train", train_limit)
+            test = load_window_arrays(root, "test", test_limit)
+        else:
+            train, test, split_meta = split_arrays(
+                load_window_full(root),
+                protocol=split_protocol,
+                test_ratio=test_ratio,
+                seed=seed,
+                test_subjects=test_subjects,
+                test_sessions=test_sessions,
+            )
+            train = _limit_arrays(train, train_limit)
+            test = _limit_arrays(test, test_limit)
         should_normalize = False if normalize is None else normalize
     elif data_mode == "trial":
-        train, test = load_seed_iv_splits(root, seed=seed, train_limit=train_limit, test_limit=test_limit)
+        actual_protocol = "stratified" if split_protocol == "predefined" else split_protocol
+        if actual_protocol != "stratified":
+            raise ValueError("Trial mode currently supports only stratified sample splitting.")
+        train, test = load_seed_iv_splits(
+            root,
+            test_ratio=test_ratio,
+            seed=seed,
+            train_limit=train_limit,
+            test_limit=test_limit,
+        )
+        split_meta = {"split_protocol": actual_protocol, "test_ratio": test_ratio}
         should_normalize = True if normalize is None else normalize
     else:
         raise ValueError(f"Unknown data mode: {data_mode}")
@@ -263,7 +369,14 @@ def build_emotion_dataloaders(
         "test_samples": int(test.label.shape[0]),
         "normalized": should_normalize,
         "stats": stats,
+        **split_meta,
     }
+    if train.subject is not None:
+        meta["train_subjects"] = np.unique(train.subject).astype(int).tolist()
+        meta["test_subjects"] = np.unique(test.subject).astype(int).tolist()
+    if train.session is not None:
+        meta["train_sessions"] = np.unique(train.session).astype(int).tolist()
+        meta["test_sessions"] = np.unique(test.session).astype(int).tolist()
     return train_loader, test_loader, meta
 
 

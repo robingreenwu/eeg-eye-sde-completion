@@ -56,11 +56,15 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/train_emotion_adv.py --smoke --data_mo
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/train_emotion_adv.py --smoke --data_mode trial --missing_rate 0.5
 ```
 
+Smoke runs now write `best_model.pth`, `last_model.pth`, and metrics to the selected `--output_dir`
+unless `--no_save` is explicitly passed.
+
 ## Example Training
 
 ```bash
 python3 scripts/train_emotion_adv.py \
   --data_mode window \
+  --split_protocol predefined \
   --missing_mode random \
   --missing_rate 0.3 \
   --batch_size 64 \
@@ -69,11 +73,40 @@ python3 scripts/train_emotion_adv.py \
   --stage3_epochs 20
 ```
 
+For stricter protocols, replace the predefined split with subject/session splits:
+
+```bash
+python3 scripts/train_emotion_adv.py --data_mode window --split_protocol subject --test_ratio 0.2
+python3 scripts/train_emotion_adv.py --data_mode window --split_protocol session --test_sessions 3
+```
+
 For modality-specific missing experiments:
 
 ```bash
 python3 scripts/train_emotion_adv.py --data_mode window --missing_mode missing_eeg
 python3 scripts/train_emotion_adv.py --data_mode window --missing_mode missing_eye
+```
+
+Training now evaluates with target-free diffusion sampling by default. Use
+`--eval_mode denoise` for a deterministic one-step diagnostic, or
+`--eval_mode teacher` only for the older stochastic one-step diagnostic.
+Adversarial and consistency losses are warmed up by default, discriminators use
+spectral normalization, and stage-3 early stopping monitors macro-F1.
+The diffusion U-Net now uses `--unet_attention critical` by default, which keeps
+attention only on the lower-resolution `down3,down4,up4,up3` layers. Use
+`--unet_attention all` to reproduce the older full-attention U-Net.
+Use `--eval_interval 5` to keep all training updates unchanged while running the
+full test-set evaluation every five epochs instead of every epoch.
+
+To evaluate one checkpoint under multiple missing-modality settings:
+
+```bash
+python3 scripts/evaluate_checkpoint.py \
+  --checkpoint runs/eeg_eye_adv/best_model.pth \
+  --missing_modes random,missing_eeg,missing_eye \
+  --missing_rates 0.3,0.5 \
+  --eval_modes sample,denoise \
+  --output_dir runs/eeg_eye_adv/eval
 ```
 
 ## Ablation Switches
