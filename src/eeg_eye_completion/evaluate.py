@@ -33,6 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--sampling_steps", type=int, default=None)
+    parser.add_argument("--generation_objective", choices=["sde", "flow"], default=None)
+    parser.add_argument("--diffusion_sampler", choices=["ddim", "sde"], default=None)
+    parser.add_argument("--ddim_eta", type=float, default=None)
+    parser.add_argument("--uncertainty_samples", type=int, default=None)
+    parser.add_argument("--uncertainty_temperature", type=float, default=None)
+    parser.add_argument("--min_generated_confidence", type=float, default=None)
+    parser.add_argument("--self_conditioning_sample", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--self_conditioning_weight", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--no_normalize", action="store_true")
@@ -94,6 +102,17 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[Adversarial
         sde_beta_max=float(_arg(ckpt_args, "sde_beta_max", 20.0)),
         noise_condition=bool(_arg(ckpt_args, "noise_condition", False)),
         spectral_norm_discriminators=bool(_arg(ckpt_args, "spectral_norm_discriminators", False)),
+        generation_objective=_arg(ckpt_args, "generation_objective", "sde"),
+        diffusion_sampler=_arg(ckpt_args, "diffusion_sampler", "sde"),
+        ddim_eta=float(_arg(ckpt_args, "ddim_eta", 0.0)),
+        fusion_type=_arg(ckpt_args, "fusion_type", "mlp"),
+        fusion_layers=int(_arg(ckpt_args, "fusion_layers", 2)),
+        fusion_dropout=float(_arg(ckpt_args, "fusion_dropout", 0.1)),
+        uncertainty_samples=int(_arg(ckpt_args, "uncertainty_samples", 1)),
+        uncertainty_temperature=float(_arg(ckpt_args, "uncertainty_temperature", 0.1)),
+        min_generated_confidence=float(_arg(ckpt_args, "min_generated_confidence", 0.05)),
+        self_conditioning_sample=bool(_arg(ckpt_args, "self_conditioning_sample", False)),
+        self_conditioning_weight=float(_arg(ckpt_args, "self_conditioning_weight", 0.5)),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -135,6 +154,30 @@ def main() -> None:
     if args.sampling_steps is not None:
         model.eeg_diffusion.sampling_steps = args.sampling_steps
         model.eye_diffusion.sampling_steps = args.sampling_steps
+    if args.generation_objective is not None:
+        objective = model.eeg_diffusion._normalize_generation_objective(args.generation_objective)
+        model.eeg_diffusion.generation_objective = objective
+        model.eye_diffusion.generation_objective = objective
+    if args.diffusion_sampler is not None:
+        model.eeg_diffusion.sampling_method = model.eeg_diffusion._normalize_sampling_method(args.diffusion_sampler)
+        model.eye_diffusion.sampling_method = model.eye_diffusion._normalize_sampling_method(args.diffusion_sampler)
+    if args.ddim_eta is not None:
+        model.eeg_diffusion.ddim_eta = args.ddim_eta
+        model.eye_diffusion.ddim_eta = args.ddim_eta
+    if args.uncertainty_samples is not None:
+        model.uncertainty_samples = max(1, int(args.uncertainty_samples))
+    if args.uncertainty_temperature is not None:
+        model.uncertainty_temperature = max(0.0, float(args.uncertainty_temperature))
+    if args.min_generated_confidence is not None:
+        model.min_generated_confidence = min(1.0, max(0.0, float(args.min_generated_confidence)))
+    if args.self_conditioning_sample is not None:
+        enabled = bool(args.self_conditioning_sample)
+        model.eeg_diffusion.self_conditioning_sample = enabled
+        model.eye_diffusion.self_conditioning_sample = enabled
+    if args.self_conditioning_weight is not None:
+        weight = min(1.0, max(0.0, float(args.self_conditioning_weight)))
+        model.eeg_diffusion.self_conditioning_weight = weight
+        model.eye_diffusion.self_conditioning_weight = weight
 
     seed = int(args.seed if args.seed is not None else _arg(ckpt_args, "seed", 0))
     seed_everything(seed)
@@ -181,6 +224,14 @@ def main() -> None:
                     "missing_mode": missing_mode,
                     "missing_rate": missing_rate,
                     "eval_mode": eval_mode,
+                    "generation_objective": model.eeg_diffusion.generation_objective,
+                    "diffusion_sampler": model.eeg_diffusion.sampling_method,
+                    "ddim_eta": model.eeg_diffusion.ddim_eta,
+                    "uncertainty_samples": model.uncertainty_samples,
+                    "uncertainty_temperature": model.uncertainty_temperature,
+                    "min_generated_confidence": model.min_generated_confidence,
+                    "self_conditioning_sample": model.eeg_diffusion.self_conditioning_sample,
+                    "self_conditioning_weight": model.eeg_diffusion.self_conditioning_weight,
                     **metrics,
                 }
                 rows.append(row)
